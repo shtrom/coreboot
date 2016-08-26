@@ -20,6 +20,8 @@
 #include <inttypes.h>
 #include <pci/pci.h>
 
+#include "intelmetool.h"
+
 #define ME_RETRY                100000  /* 1 second */
 #define ME_DELAY                10      /* 10 us */
 

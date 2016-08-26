@@ -22,7 +22,7 @@
 #define ME_PRESENT_CAN_DISABLE 4
 #define ME_PRESENT_CANNOT_DISABLE 5
 
-#define INTELMETOOL_VERSION "1.0"
+#define INTELMETOOL_VERSION "1.1"
 
 #if defined(__GLIBC__)
 #include <sys/io.h>
@@ -48,7 +48,14 @@
 #define CWHT  "\x1B[37m"
 #define RESET "\033[0m"
 
+#define CPU_ID_SIZE 13
+#define FD2 0x3428
+#define ME_COMMAND_DELAY 10000
+#define ME_MESSAGE_LEN 256
+#define INTEL_PLATFORM_VENDOR_ID 0x8086
+
 extern int debug;
+extern void print_cap(const char *name, int state);
 
 #define PCI_VENDOR_ID_INTEL 0x8086
 

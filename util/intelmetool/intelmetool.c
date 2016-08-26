@@ -16,6 +16,8 @@
 #include <stdlib.h>
 #include <getopt.h>
 #include <unistd.h>
+#include <string.h>
+#include <cpuid.h>
 
 #ifdef __NetBSD__
 #include <machine/sysarch.h>
@@ -23,6 +25,7 @@
 
 #include "me.h"
 #include "mmap.h"
+#include "msr.h"
 #include "intelmetool.h"
 
 #define FD2 0x3428
@@ -34,6 +37,13 @@ int debug = 0;
 static uint32_t fd2 = 0;
 static const int size = 0x4000;
 static volatile uint8_t *rcba;
+static char cpu_id[CPU_ID_SIZE] = { 0 };
+
+void print_cap(const char *name, int state)
+{
+	printf("ME Capability: %-30s : %s\n",
+	       name, state ? CRED "ON" RESET : CGRN "OFF" RESET);
+}
 
 static void dumpmem(uint8_t *phys, uint32_t size)
 {
@@ -71,6 +81,16 @@ static void rehide_me(void)
 		*(uint32_t *)(rcba + FD2) = fd2 | 0x2;
 		printf("done\n");
 	}
+}
+
+static void get_cpu_id(char *id) {
+	regs_t regs;
+	unsigned int level = 0;
+	unsigned int eax = 0;
+
+	__get_cpuid(level, &eax, &regs.ebx, &regs.ecx, &regs.edx);
+
+	memcpy(id, (char *)&regs, CPU_ID_SIZE);
 }
 
 /* You need >4GB total ram, in kernel cmdline, use 'mem=1000m'
@@ -296,10 +316,63 @@ static void dump_me_info(void)
 	munmap((void*)rcba, size);
 }
 
+static void dump_bootguard_info() {
+	struct pci_dev *dev;
+	uint32_t stat = 0;
+	char namebuf[1024], msg[ME_MESSAGE_LEN] = { 0 };
+	const char *name;
+	uint64_t bootguard = 0;
+
+	if(msr_bootguard(&bootguard, debug) < 0) {
+		return;
+	}
+
+	pci_platform_scan(msg);
+	dev = pci_me_interface_scan(&name, namebuf, sizeof(namebuf));
+	activate_me();
+
+	if(dev) {
+		stat = pci_read_long(dev, 0x40);
+	}
+
+	if(debug) {
+		printf("BootGuard MSR Output: 0x%" PRIx64 "\n", bootguard);
+		bootguard &= ~0xff;
+	}
+
+	if(BOOTGUARD_CAPABILITY(bootguard)) {
+		print_cap("BootGuard                                 ", 1);
+		if (dev && (stat & 0x10)) {
+			printf(CYEL "Your southbridge configuration is insecure!! BootGuard keys can be overwritten or wiped or you are in developer mode.\n" RESET);
+		}
+		switch(bootguard) {
+		case BOOTGUARD_DISABLED:
+			printf("ME Capability: BootGuard Mode                             : " CGRN "Disabled\n" RESET);
+			printf(CGRN "\nYour system is bootguard ready but your vendor disabled it. You can flash other firmware!\n" RESET);
+			break;
+		case BOOTGUARD_ENABLED_COMBI_MODE:
+			printf("ME Capability: BootGuard Mode                             : " CRED "Verified & Measured Boot\n" RESET);
+			printf(CRED "\nYou can't flash other firmware. Verified boot is enabled!\n" RESET);
+			break;
+		case BOOTGUARD_ENABLED_MEASUREMENT_MODE:
+			printf("ME Capability: BootGuard Mode                             : " CGRN "Measured Boot\n" RESET);
+			printf(CGRN "\nYour system is bootguard ready but only running the measured boot mode. You can flash other firmware!\n" RESET);
+			break;
+		case BOOTGUARD_ENABLED_VERIFIED_MODE:
+			printf("ME Capability: BootGuard Mode                             : " CRED "Verified Boot\n" RESET);
+			printf(CRED "\nYou can't flash other firmware. Verified boot is enabled!\n" RESET);
+			break;
+		}
+	} else {
+		print_cap("BootGuard                                 ", 0);
+		printf(CGRN "\nYour system isn't bootguard ready. You can flash other firmware!\n" RESET);
+	}
+}
+
 static void print_version(void)
 {
 	printf("intelmetool v%s -- ", INTELMETOOL_VERSION);
-	printf("Copyright (C) 2015 Damien Zammit\n\n");
+	printf("Copyright (C) 2016 Damien Zammit, Philipp Deppenwiese\n\n");
 	printf(
 		"This program is free software: you can redistribute it and/or modify\n"
 		"it under the terms of the GNU General Public License as published by\n"
@@ -312,13 +385,14 @@ static void print_version(void)
 
 static void print_usage(const char *name)
 {
-	printf("usage: %s [-vh?sd]\n", name);
+	printf("usage: %s [-vh?mdb]\n", name);
 	printf("\n"
-			 "   -v | --version:                   print the version\n"
-			 "   -h | --help:                      print this help\n\n"
-			 "   -s | --show:                      dump all me information on console\n"
-			 "   -d | --debug:                     enable debug output\n"
-			 "\n");
+	       "   -v | --version                    print the version\n"
+	       "   -h | --help                       print this help\n\n"
+	       "   -m | --me                         dump all me related information on console\n"
+	       "   -b | --bootguard                  dump bootguard state of the platform\n"
+	       "   -d | --debug                      enable debug output\n"
+	       "\n");
 	exit(1);
 }
 
@@ -330,20 +404,24 @@ int main(int argc, char *argv[])
 	static struct option long_options[] = {
 		{"version", 0, 0, 'v'},
 		{"help", 0, 0, 'h'},
-		{"show", 0, 0, 's'},
+		{"me", 0, 0, 'm'},
+		{"bootguard", 0, 0, 'b'},
 		{"debug", 0, 0, 'd'},
 		{0, 0, 0, 0}
 	};
 
-	while ((opt = getopt_long(argc, argv, "vh?sd",
+	while ((opt = getopt_long(argc, argv, "vh?mdb",
 				long_options, &option_index)) != EOF) {
 		switch (opt) {
 		case 'v':
 			print_version();
 			exit(0);
 			break;
-		case 's':
+		case 'm':
 			cmd_exec = 1;
+			break;
+		case 'b':
+			cmd_exec = 2;
 			break;
 		case 'd':
 			debug = 1;
@@ -358,38 +436,48 @@ int main(int argc, char *argv[])
 	}
 
 	#if defined(__FreeBSD__)
-		if (open("/dev/io", O_RDWR) < 0) {
-			perror("/dev/io");
+	if (open("/dev/io", O_RDWR) < 0) {
+		perror("/dev/io");
 	#elif defined(__NetBSD__)
 	# ifdef __i386__
-		if (i386_iopl(3)) {
-			perror("iopl");
+	if (i386_iopl(3)) {
+		perror("iopl");
 	# else
-		if (x86_64_iopl(3)) {
-			perror("iopl");
+	if (x86_64_iopl(3)) {
+		perror("iopl");
 	# endif
 	#else
-		if (iopl(3)) {
-			perror("iopl");
+	if (iopl(3)) {
+		perror("iopl");
 	#endif
-			printf("You need to be root.\n");
-			exit(1);
-		}
+		printf("You need to be root.\n");
+		exit(1);
+	}
 
 	#ifndef __DARWIN__
-		if ((fd_mem = open("/dev/mem", O_RDWR)) < 0) {
-			perror("Can not open /dev/mem");
-			exit(1);
-		}
+	if ((fd_mem = open("/dev/mem", O_RDWR)) < 0) {
+		perror("Can not open /dev/mem");
+		exit(1);
+	}
+
+	get_cpu_id(cpu_id);
+	if(strncmp(cpu_id, "GenuineIntel", CPU_ID_SIZE-1)) {
+		perror("Error CPU is not from Intel.");
+		exit(1);
+	}
 	#endif
 
 	switch(cmd_exec) {
-	case 1:
-		dump_me_info();
-		break;
-	default:
-		print_usage(argv[0]);
-		break;
+		case 1:
+			dump_me_info();
+			break;
+		case 2:
+			dump_bootguard_info();
+			break;
+		default:
+			dump_me_info();
+			dump_bootguard_info();
+			break;
 	}
 
 	return 0;
