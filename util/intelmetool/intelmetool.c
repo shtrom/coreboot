@@ -327,7 +327,7 @@ static void dump_bootguard_info() {
 		return;
 	}
 
-	pci_platform_scan(msg);
+	pci_platform_scan();
 	dev = pci_me_interface_scan(&name, namebuf, sizeof(namebuf));
 	activate_me();
 
